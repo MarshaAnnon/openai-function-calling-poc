@@ -1,40 +1,52 @@
-import { Configuration, OpenAIApi } from "openai";
+import { Configuration, OpenAIApi } from 'openai';
+import { availableFunctions } from '../../utils/functions';
+import { App } from '@slack/bolt';
+import { NextApiRequest, NextApiResponse } from 'next';
 
 const configuration = new Configuration({
   apiKey: process.env.OPENAI_API_KEY,
 });
 const openai = new OpenAIApi(configuration);
 
-export default async function (req, res) {
+const app = new App({
+  signingSecret: process.env.SLACK_SIGNING_SECRET,
+  token: process.env.SLACK_BOT_TOKEN,
+});
+
+const functions = availableFunctions;
+
+var history = [];
+
+export default async function (req: NextApiRequest, res: NextApiResponse) {
   if (!configuration.apiKey) {
     res.status(500).json({
       error: {
         message:
-          "OpenAI API key not configured, please follow instructions in README.md",
-      },
-    });
-    return;
-  }
-
-  const animal = req.body.animal || "";
-  if (animal.trim().length === 0) {
-    res.status(400).json({
-      error: {
-        message: "Please enter a valid animal",
+          'OpenAI API key not configured, please follow instructions in README.md',
       },
     });
     return;
   }
 
   try {
-    const completion = await openai.createCompletion({
-      model: "text-davinci-003",
-      prompt: generatePrompt(animal),
-      temperature: 0.6,
-    });
-    res.status(200).json({ result: completion.data.choices[0].text });
+    history.push({ role: 'user', content: req.body.text });
+
+    let responseText = '';
+    const response = await getOpenAiResponse();
+    if (response.function_call) {
+      responseText = await callFunction(response.function_call);
+      history.push({
+        role: 'function',
+        name: response.function_call.name,
+        content: responseText,
+      });
+    } else {
+      responseText = response.content;
+      history.push({ role: 'assistant', content: responseText });
+    }
+
+    return res.status(200).json({ result: responseText });
   } catch (error) {
-    // Consider adjusting the error handling logic for your use case
     if (error.response) {
       console.error(error.response.status, error.response.data);
       res.status(error.response.status).json(error.response.data);
@@ -42,22 +54,42 @@ export default async function (req, res) {
       console.error(`Error with OpenAI API request: ${error.message}`);
       res.status(500).json({
         error: {
-          message: "An error occurred during your request.",
+          message: 'An error occurred during your request.',
         },
       });
     }
   }
 }
 
-function generatePrompt(animal) {
-  const capitalizedAnimal =
-    animal[0].toUpperCase() + animal.slice(1).toLowerCase();
-  return `Suggest three names for an animal that is a superhero.
+async function getOpenAiResponse() {
+  const payload = {
+    model: 'gpt-3.5-turbo',
+    messages: [
+      {
+        role: 'system',
+        content:
+          'You are a chat assistant.',
+      },
+      ...history,
+    ],
+    functions: functions.map((func) => func.schema),
+  };
 
-Animal: Cat
-Names: Captain Sharpclaw, Agent Fluffball, The Incredible Feline
-Animal: Dog
-Names: Ruff the Protector, Wonder Canine, Sir Barks-a-Lot
-Animal: ${capitalizedAnimal}
-Names:`;
+  const result = await openai.createChatCompletion(payload);
+  console.log('the results are --->>>', result);
+  return result.data.choices.shift().message;
 }
+
+function callFunction(function_call) {
+  const func = functions.find(
+    (func) => func.schema.name === function_call.name
+  );
+  const args = JSON.parse(function_call.arguments);
+  return func.function(args);
+}
+
+(async () => {
+  await app.start(process.env.PORT || 3000);
+
+  console.log('⚡️ Slack bot server is running!');
+})();
